@@ -1,9 +1,8 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import hashlib
 import io
-import json
 import uuid
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,7 +16,7 @@ st.set_page_config(
 
 
 # =============================================================================
-# PROVENANCE DATA MODEL
+# PROVENANCE DATA MODEL (16-FIELD SCHEMA)
 # =============================================================================
 @dataclass
 class Article:
@@ -61,10 +60,7 @@ def can_analyze(article: Article) -> bool:
 # LAYER 1: EVIDENCE RETRIEVAL ENGINE (DETERMINISTIC / NO LLM INVOLVEMENT)
 # =============================================================================
 class EvidenceLayerEngine:
-    """Handles API connections to PubMed, Crossref, and Europe PMC.
-
-    Determines actual literature existence without LLM memory generation.
-    """
+    """Handles API connections to PubMed and Crossref to verify existence."""
 
     def __init__(self, user_agent: str = "EvidenceEngine/3.0"):
         self.headers = {"User-Agent": user_agent}
@@ -208,7 +204,6 @@ class EvidenceLayerEngine:
                 article_res.ci_upper = float(row.get("ci_upper", 0.0))
                 return article_res
 
-        # If validation fails, return unverified rejected article object
         return Article(
             internal_id=internal_id,
             title=claimed_title,
@@ -234,20 +229,15 @@ class EvidenceLayerEngine:
 
 
 # =============================================================================
-# LAYER 2: BOUNDED AI REASONING & SYNTHESIS LAYER (NO RETRIEVAL ACCESS)
+# LAYER 2: ISOLATED AI SYNTHESIS LAYER
 # =============================================================================
 class AISynthesisLayer:
-    """Operates downstream of the Firewall.
-
-    Has ZERO direct retrieval tools and processes ONLY verified Article
-    payloads passed from Layer 1.
-    """
+    """Processes verified articles downstream without direct retrieval capabilities."""
 
     @staticmethod
     def perform_eligibility_screening(
         verified_articles: list[Article],
     ) -> pd.DataFrame:
-        """Determines eligibility screening purely bounded by verified records."""
         screening_records = []
         for art in verified_articles:
             screening_records.append({
@@ -266,7 +256,6 @@ class AISynthesisLayer:
     def perform_risk_of_bias(
         verified_articles: list[Article],
     ) -> pd.DataFrame:
-        """Assists with Risk of Bias categorization across verified articles."""
         rob_records = []
         for art in verified_articles:
             rob_records.append({
@@ -288,7 +277,6 @@ class AISynthesisLayer:
         ci_low: float,
         ci_high: float,
     ) -> str:
-        """Drafts manuscript narrative using strictly isolated context."""
         citations = "\n".join([
             f"* **[{art.internal_id}]** {art.authors} ({art.year})."
             f" *{art.title}*. **{art.journal}**. DOI: {art.DOI} | PMID:"
@@ -296,7 +284,7 @@ class AISynthesisLayer:
             for art in verified_articles
         ])
 
-        manuscript = f"""# Systematic Evidence Synthesis (Isolated Architecture)
+        return f"""# Systematic Evidence Synthesis (Isolated Architecture)
 
 ## Methodology & Architectural Bounds
 All literature records in this synthesis were retrieved exclusively by the deterministic Evidence Layer engine from indexed databases (PubMed/Crossref/Europe PMC) and passed through a Hard Citation Firewall (`can_analyze() == True`). The AI Layer generated this draft without direct access to web search or unverified internal memory.
@@ -313,16 +301,143 @@ Inverse-variance fixed-effects synthesis of verified primary endpoints produced 
 ## Critical Appraisal Summary
 Risk of bias evaluation confirmed robust methodology across included randomized trials, with zero unverified or hallucinated studies entering the quantitative pipeline.
 """
-        return manuscript
 
 
 # =============================================================================
-# STREAMLIT UI & ARCHITECTURAL WORKFLOW
+# APPLICATION INTERFACE & WORKFLOW
 # =============================================================================
 evidence_engine = EvidenceLayerEngine()
 ai_engine = AISynthesisLayer()
 
 st.title("Isolated Evidence-AI Systematic Review Engine")
 
-# ARCHITECTURAL DIAGRAM DISPLAY
-st.markdown("""
+# LAYER 1
+st.header("Step 1: Layer 1 Evidence Engine (Retrieval)")
+if "retrieved_articles" not in st.session_state:
+    st.session_state["retrieved_articles"] = []
+
+tab1, tab2 = st.tabs([
+    "Batch Upload & Verification Gate",
+    "Direct Query (PubMed / DOI)",
+])
+
+with tab1:
+    demo_csv = (
+        "study_id,title,doi,mean_diff,ci_lower,ci_upper\n"
+        "Colhoun et al. (2004),Primary prevention of cardiovascular disease with"
+        " atorvastatin in type 2 diabetes in the Collaborative Atorvastatin"
+        " Diabetes Study (CARDS): multicentre randomised placebo-controlled"
+        " trial,10.1016/S0140-6736(04)16895-5,-3.40,-4.50,-2.30\n"
+        "Anker et al. (2021),Empagliflozin in Heart Failure with a Preserved"
+        " Ejection Fraction,10.1056/NEJMoa2107038,-4.10,-5.30,-2.90\n"
+        "Hallucinated Study (2024),Fake Non-Existent Article Title for Ingress"
+        " Testing,10.1000/182,-5.10,-6.20,-4.00\n"
+    )
+    if st.button("Load Built-in Demo Cohort"):
+        df_demo = pd.read_csv(io.StringIO(demo_csv))
+        qid = f"SQ-{uuid.uuid4().hex[:6].upper()}"
+        st.session_state["retrieved_articles"] = []
+        for idx, row in df_demo.iterrows():
+            art = evidence_engine.verify_raw_row(row, qid)
+            st.session_state["retrieved_articles"].append(art)
+        st.success("Ingested demo cohort into Evidence Layer.")
+
+with tab2:
+    pmid_input = st.text_input(
+        "Fetch Live PubMed Record by PMID:", placeholder="e.g. 15286102"
+    )
+    if st.button("Query PubMed API"):
+        if pmid_input:
+            qid = f"SQ-{uuid.uuid4().hex[:6].upper()}"
+            art = evidence_engine.fetch_pubmed_by_pmid(pmid_input.strip(), qid)
+            if art:
+                st.session_state["retrieved_articles"].append(art)
+                st.success(f"Retrieved real record: {art.title}")
+
+# FIREWALL GATE & COHORT SCOPE TOGGLE
+if st.session_state["retrieved_articles"]:
+    st.markdown("---")
+    st.header("Step 3 End: Hard Citation Firewall & Scope Selection")
+
+    verified_articles = [
+        art for art in st.session_state["retrieved_articles"] if can_analyze(art)
+    ]
+    all_articles = st.session_state["retrieved_articles"]
+
+    scope_choice = st.radio(
+        "Select cohort dataset to analyze in downstream AI steps:",
+        options=[
+            "Analyze Non-Hallucinating Cohort Only (Passed Hard Firewall)",
+            "Analyze Entire Raw Ingested Dataset (Includes Unverified/Fake)",
+        ],
+        index=0,
+    )
+
+    if scope_choice == "Analyze Non-Hallucinating Cohort Only (Passed Hard Firewall)":
+        active_articles = verified_articles
+        st.success(
+            f"Active Scope: Non-hallucinating cohort selected ({len(active_articles)} verified records)."
+        )
+    else:
+        active_articles = all_articles
+        st.warning(
+            f"Active Scope: Unfiltered cohort selected ({len(active_articles)} raw records)."
+        )
+
+    # LAYER 2 DOWNSTREAM
+    st.markdown("---")
+    st.header("Step 4 to 7: Layer 2 AI Synthesis Output")
+
+    if active_articles:
+        st.subheader("Step 4: PRISMA & Provenance Stream")
+        st.dataframe(
+            pd.DataFrame([asdict(a) for a in active_articles]),
+            use_container_width=True,
+        )
+
+        st.subheader("Step 5: Outcome Analysis (Forest Plot)")
+        df_active = pd.DataFrame([asdict(a) for a in active_articles])
+        means = df_active["mean_diff"]
+        err_low = means - df_active["ci_lower"]
+        err_high = df_active["ci_upper"] - means
+        std_errors = (df_active["ci_upper"] - df_active["ci_lower"]) / (2 * 1.96)
+        weights = 1.0 / np.maximum(std_errors**2, 1e-6)
+        pooled_mean = float(np.sum(weights * means) / np.sum(weights))
+        pooled_se = float(np.sqrt(1.0 / np.sum(weights)))
+        pooled_ci_low = pooled_mean - 1.96 * pooled_se
+        pooled_ci_high = pooled_mean + 1.96 * pooled_se
+
+        fig, ax = plt.subplots(figsize=(10, max(3, len(active_articles) * 0.8 + 2)))
+        y_pos = np.arange(len(active_articles))
+        ax.errorbar(
+            means,
+            y_pos,
+            xerr=[err_low, err_high],
+            fmt="s",
+            color="#0F52BA",
+            ecolor="#0F52BA",
+            elinewidth=2,
+            capsize=4,
+        )
+        ax.axvline(x=0, color="red", linestyle="--", linewidth=1)
+        ax.scatter([pooled_mean], [-1], marker="D", s=140, color="#2E7D32", zorder=5)
+        ax.plot([pooled_ci_low, pooled_ci_high], [-1, -1], color="#2E7D32", linewidth=3)
+        ax.set_yticks(np.append(y_pos, -1))
+        ax.set_yticklabels(
+            list(df_active["study_id"]) + ["Overall Pooled Effect"], fontweight="bold"
+        )
+        ax.invert_yaxis()
+        ax.set_xlabel("Mean Difference (95% CI)", fontweight="bold")
+        st.pyplot(fig)
+
+        st.subheader("Step 6: Risk of Bias Matrix")
+        st.dataframe(
+            ai_engine.perform_risk_of_bias(active_articles),
+            use_container_width=True,
+        )
+
+        st.subheader("Step 7: Manuscript Draft")
+        manuscript = ai_engine.synthesize_manuscript(
+            active_articles, pooled_mean, pooled_ci_low, pooled_ci_high
+        )
+        st.text_area("Generated Bounded Manuscript", manuscript, height=250)
